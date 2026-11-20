@@ -14,14 +14,23 @@ import android.view.Gravity
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
-import java.text.SimpleDateFormat
-import java.util.Date
+import android.widget.Toast
+import com.jarvis.ai.ai.AIManager
+import com.jarvis.ai.core.AssistantCore
+import com.jarvis.ai.memory.MemoryStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 class MainActivity : Activity(), TextToSpeech.OnInitListener {
     private lateinit var status: TextView
     private lateinit var transcript: TextView
     private lateinit var tts: TextToSpeech
+    private lateinit var assistantCore: AssistantCore
+    private val screenScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private val cyan = Color.rgb(82, 224, 245)
     private val background = Color.rgb(7, 10, 18)
     private val panel = Color.rgb(17, 25, 39)
@@ -36,6 +45,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         window.statusBarColor = background
         window.navigationBarColor = background
         tts = TextToSpeech(this, this)
+        assistantCore = AssistantCore(AIManager(), MemoryStore(this))
         buildScreen()
     }
 
@@ -57,7 +67,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         page.addView(brand, matchWrap())
 
         val subtitle = TextView(this).apply {
-            text = "PERSONAL AI SYSTEM  •  PROTOTYPE 0.1"
+            text = "PERSONAL AI SYSTEM  •  PROTOTYPE 0.2"
             textSize = 10f
             letterSpacing = 0.12f
             setTextColor(Color.LTGRAY)
@@ -85,7 +95,7 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         page.addView(status, matchWrap())
 
         transcript = TextView(this).apply {
-            text = "Здравствуйте. Я JARVIS.\nНажмите кнопку и произнесите команду."
+            text = "Здравствуйте. Я JARVIS.\nИстория диалога сохраняется локально на устройстве."
             textSize = 15f
             setTextColor(Color.WHITE)
             gravity = Gravity.CENTER
@@ -106,8 +116,21 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
             topMargin = 22
         })
 
+        val clearHistory = Button(this).apply {
+            text = "Очистить историю диалога"
+            isAllCaps = false
+            setOnClickListener {
+                assistantCore.clearConversation()
+                transcript.text = "История диалога очищена."
+                Toast.makeText(this@MainActivity, "Локальная история удалена", Toast.LENGTH_SHORT).show()
+            }
+        }
+        page.addView(clearHistory, LinearLayout.LayoutParams(-1, 48).apply {
+            topMargin = 8
+        })
+
         val note = TextView(this).apply {
-            text = "Голосовой прототип • Для распознавания может понадобиться интернет"
+            text = "Локальный режим • Облачная модель пока не подключена"
             textSize = 10f
             setTextColor(Color.GRAY)
             gravity = Gravity.CENTER
@@ -167,7 +190,6 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
         if (resultCode == RESULT_OK) {
             val spoken = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
                 ?.firstOrNull().orEmpty()
-            transcript.text = "ВЫ: " + spoken
             processCommand(spoken)
         } else {
             status.text = "SYSTEM STANDBY"
@@ -176,34 +198,30 @@ class MainActivity : Activity(), TextToSpeech.OnInitListener {
     }
 
     private fun processCommand(raw: String) {
-        val command = raw.lowercase(Locale.ROOT)
-        val answer = when {
-            "привет" in command || "здравствуй" in command ->
-                "Здравствуйте. Рад вас слышать. Чем могу помочь?"
-            "время" in command ->
-                "Сейчас " + SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date()) + "."
-            "дата" in command || "число" in command ->
-                "Сегодня " + SimpleDateFormat("d MMMM yyyy", Locale("ru")).format(Date()) + "."
-            "как дела" in command ->
-                "Все системы работают в режиме прототипа. Готов к вашим командам."
-            "кто ты" in command ->
-                "Я JARVIS, ваш персональный голосовой помощник. Пока я нахожусь на ранней стадии разработки."
-            else ->
-                "Команду получил. Интеллектуальный модуль ещё подключается. В следующей версии я смогу отвечать на более сложные вопросы."
+        transcript.text = "ВЫ: $raw\n\nJARVIS: обрабатываю запрос..."
+        status.text = "THINKING"
+        screenScope.launch {
+            val answer = runCatching { assistantCore.ask(raw) }
+                .getOrElse { "Не удалось обработать запрос. Попробуйте ещё раз." }
+            transcript.text = "ВЫ: $raw\n\nJARVIS: $answer"
+            status.text = "SPEAKING"
+            if (::tts.isInitialized) {
+                tts.speak(answer, TextToSpeech.QUEUE_FLUSH, null, "jarvis_reply")
+            }
+            status.postDelayed({
+                if (!isFinishing) status.text = "SYSTEM STANDBY"
+            }, 2500)
         }
-        transcript.text = "ВЫ: " + raw + "\n\nJARVIS: " + answer
-        status.text = "SPEAKING"
-        if (::tts.isInitialized) tts.speak(answer, TextToSpeech.QUEUE_FLUSH, null, "jarvis_reply")
-        status.postDelayed({
-            if (!isFinishing) status.text = "SYSTEM STANDBY"
-        }, 2500)
     }
 
     override fun onInit(result: Int) {
-        if (result == TextToSpeech.SUCCESS) tts.language = Locale("ru", "RU")
+        if (result == TextToSpeech.SUCCESS) {
+            tts.language = Locale("ru", "RU")
+        }
     }
 
     override fun onDestroy() {
+        screenScope.cancel()
         if (::tts.isInitialized) {
             tts.stop()
             tts.shutdown()
